@@ -94,12 +94,27 @@
     import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
     import { getFirestore, doc, collection, addDoc, onSnapshot, serverTimestamp, setLogLevel, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-    // 強制使用全域提供的變數（或設定預設值）
-    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+    // =========================================================================
+    // !!! IMPORTANT: FOR GITHUB PAGES, YOU MUST REPLACE THESE PLACEHOLDERS !!!
+    // 請將 YOUR_..._HERE 替換為您自己的 Firebase 專案配置，以啟用記帳功能。
+    // 如果不替換，應用程式將無法連接到資料庫。
+    // =========================================================================
+    const firebaseConfig = {
+        apiKey: "AIzaSyDw5WU0O7emQgXcCpuA_LpOMsdP8Xalkpo",
+        authDomain: "project-90335699733761631.firebaseapp.com",
+        projectId: "project-90335699733761631", 
+        storageBucket: "project-90335699733761631.firebasestorage.app",
+        messagingSenderId: "201574697204",
+        appId: "1:201574697204:web:c51b122cbe9977f732b6a1"
+    };
+    
+    // 預設 App ID (用於 Firestore 收藏夾路徑)
+    // 如果在 Canvas 環境中運行，會使用 Canvas 提供的 __app_id。
     const appId = typeof __app_id !== 'undefined' ? __app_id : 'hk-trip-planner';
+    // 認證令牌 (在獨立網站上通常為 null)
     const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
-    // API 設定 (請替換為您的實際 API 金鑰)
+    // API 設定 (請替換為您的實際 Gemini API 金鑰)
     const API_KEY = "YOUR_GEMINI_API_KEY"; // <<<<<<< 請替換成您的 Gemini API 金鑰
     const MODEL_NAME = "gemini-2.5-flash-preview-09-2025";
     const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${API_KEY}`;
@@ -123,6 +138,15 @@
     async function initFirebase() {
         try {
             setLogLevel('Debug');
+            
+            // 檢查 Firebase Config 是否有至少提供 projectId (避免 404 之後的初始化失敗)
+            if (!firebaseConfig.projectId || firebaseConfig.projectId.includes("YOUR_PROJECT_ID")) {
+                const loadingMessage = document.getElementById('loading-message');
+                loadingMessage.textContent = '應用程式初始化失敗。請檢查程式碼中第 77 行左右的 Firebase 配置，並替換為您自己的 Project ID 等信息。';
+                console.error("Firebase initialization failed: projectId not provided or is a placeholder.");
+                return; 
+            }
+            
             const app = initializeApp(firebaseConfig);
             db = getFirestore(app);
             auth = getAuth(app);
@@ -155,7 +179,7 @@
                             await signInWithCustomToken(auth, initialAuthToken);
                         } else {
                             await signInAnonymously(auth);
-                            statusDisplay.textContent = '匿名登入';
+                            // 匿名登入成功後，onAuthStateChanged 會再次觸發，並進入 if (user) 區塊
                         }
                     } catch (error) {
                         console.error("Firebase Auth failed:", error);
@@ -181,6 +205,13 @@
             tools: [{ "google_search": {} }],
             systemInstruction: { parts: [{ text: systemPrompt }] },
         };
+
+        // 檢查 API 金鑰是否已設定
+        if (API_KEY.includes("YOUR_GEMINI_API_KEY")) {
+             console.warn("Gemini API 金鑰未設定。跳過匯率獲取。");
+             hkdToTwdRate = 4.0; // 預設值
+             return hkdToTwdRate;
+        }
 
         for (let i = 0; i < retries; i++) {
             try {
@@ -241,6 +272,8 @@
             calculateGrandTotal();
         }, (error) => {
             console.error("Error listening to expenses:", error);
+            document.getElementById('loading-message').textContent = `資料庫連線失敗。請檢查您的 Firebase Security Rules 是否允許讀取。`;
+            document.getElementById('loading-message').classList.remove('hidden');
         });
     }
 
@@ -274,6 +307,7 @@
             grandTotalDisplay += ` / NT$ ${totalTWD.toFixed(0)}`;
         }
         document.getElementById('grand-total').textContent = grandTotalDisplay;
+        // 確保導航欄的 sticky top 設定正確
         document.getElementById('day-nav-bar').style.top = `${document.getElementById('main-header').offsetHeight}px`;
     }
 
@@ -599,6 +633,11 @@
             contents: [{ parts: [{ text: query }] }],
             tools: [{ "google_search": {} }],
         };
+        
+        // 檢查 API 金鑰是否已設定
+        if (API_KEY.includes("YOUR_GEMINI_API_KEY")) {
+             return `請在程式碼中設定您的 Gemini API 金鑰 (在第 91 行左右)，才能啟用 AI 故事查詢功能。`;
+        }
 
         for (let i = 0; i < retries; i++) {
             try {

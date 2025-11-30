@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>香港遊 - 日式簡約風行程與記帳</title>
+    <!-- 載入 Tailwind CSS (CDN 方式，簡化部署) --><script src="https://cdn.tailwindcss.com"></script>
+    <!-- 設置字體為 Noto Sans TC (繁體中文) --><link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;700;900&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Noto Sans TC', 'Inter', sans-serif;
+            background-color: #F5F3ED; /* 奶茶色 (淺暖米色) */
+            -webkit-overflow-scrolling: touch;
+        }
+        .app-container {
+            max-width: 420px;
+            margin: 0 auto;
+            min-height: 100vh;
+            background-color: #ffffff; /* 內容區塊為純白 */
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.05); /* 輕微的整體陰影 */
+        }
+        .light-header {
+            background-color: #ffffff;
+            color: #333;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        .light-header h1 {
+            color: #1f2937;
+            font-weight: 900;
+        }
+
+        /* 響應式日期滾動條樣式 */
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        #day-navigation { @apply flex overflow-x-scroll snap-x snap-mandatory no-scrollbar p-1; }
+        .day-item-inner { @apply p-3 md:p-4 text-center rounded-xl font-bold transition duration-300 transform active:scale-95 border-2; }
+        .day-item-inner.active { @apply bg-blue-600 text-white shadow-lg border-blue-600; }
+        .day-item-inner.inactive { @apply bg-white text-gray-700 hover:bg-gray-50 border-gray-100; }
+
+        /* 垂直行程時間線卡片樣式 */
+        .itinerary-item { @apply relative pl-10 pb-8; }
+        .itinerary-item::before { /* 時間線點 */
+            content: ''; position: absolute; top: 5px; left: 0;
+            width: 10px; height: 10px; border-radius: 50%;
+            background-color: #e5e7eb; z-index: 10;
+        }
+        .itinerary-item::after { /* 時間線線條 */
+            content: ''; position: absolute; top: 15px; left: 4px;
+            width: 2px; height: 100%; background-color: #e5e7eb; z-index: 5;
+        }
+        .itinerary-item:last-child::after { display: none; } /* 最後一個項目不顯示線條 */
+        
+        .itinerary-card { @apply p-4 bg-white rounded-xl shadow-lg transition duration-300 relative border-l-4 border-t border-r; }
+        .card-attraction { border-left-color: #F472B6; border-color: #FCE7F6; }
+        .card-transport { border-left-color: #60A5FA; border-color: #E0F2FE; }
+
+        /* Loading Dots */
+        .loading-dot { animation: bounce 1s infinite; }
+        .loading-dot:nth-child(2) { animation-delay: 0.2s; }
+        .loading-dot:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes bounce {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-5px); }
+        }
+    </style>
+</head>
+<body>
+
+<div id="app" class="app-container">
+
+    <!-- 頂部標題與總花費 --><header id="main-header" class="pt-6 pb-2 sticky top-0 light-header z-20 shadow-md">
+        <h1 class="text-3xl text-center tracking-wider">香港遊</h1>
+        <div class="flex justify-between items-center px-4 mt-3 pb-2">
+            <p class="text-xs text-gray-400">狀態: <span id="auth-status">載入中...</span></p>
+            <p class="text-xl font-extrabold text-red-500">總花費: <span id="grand-total">HK$ 0.00</span></p>
+        </div>
+    </header>
+    
+    <!-- 每日行程切換導航 --><nav id="day-nav-bar" class="sticky light-header pt-2 pb-2 z-10 shadow-sm">
+        <div id="day-navigation" class="flex overflow-x-scroll snap-x snap-mandatory no-scrollbar p-1">
+            <!-- 日期項目將由 JavaScript 動態生成 --></div>
+    </nav>
+
+    <!-- 行程卡片容器 --><div id="itinerary-cards" class="p-4 pt-6">
+        <p id="loading-message" class="text-center text-gray-400 mt-10">正在初始化應用程式和資料庫...</p>
+    </div>
+
+</div>
+
+<script type="module">
+    // --- 0. Firebase & API Imports/Setup ---
+    
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getFirestore, doc, collection, addDoc, onSnapshot, serverTimestamp, setLogLevel, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+    // 強制使用全域提供的變數（或設定預設值）
+    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'hk-trip-planner';
+    const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+    // API 設定 (請替換為您的實際 API 金鑰)
+    const API_KEY = "YOUR_GEMINI_API_KEY"; // <<<<<<< 請替換成您的 Gemini API 金鑰
+    const MODEL_NAME = "gemini-2.5-flash-preview-09-2025";
+    const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${API_KEY}`;
+    
+    // 全域狀態
+    let db, auth;
+    let currentDay = 1;
+    const INFO_PAGE_DAY = 5;
+    let userId = null;
+    let isAuthReady = false;
+    const loadedContent = {};
+    let expenses = [];
+    let hkdToTwdRate = null;
+
+    const dayLabels = { 1: "Day 1", 2: "Day 2", 3: "Day 3", 4: "Day 4", [INFO_PAGE_DAY]: "實用資訊" };
+
+    const getExpensesCollection = (uid) => collection(db, `artifacts/${appId}/users/${uid}/expenses`);
+
+    // --- 1. Firebase 初始化與認證 ---
+
+    async function initFirebase() {
+        try {
+            setLogLevel('Debug');
+            const app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+            
+            const loadingMessage = document.getElementById('loading-message');
+            loadingMessage.textContent = '正在驗證用戶身份...';
+
+            onAuthStateChanged(auth, async (user) => {
+                const statusDisplay = document.getElementById('auth-status');
+                if (user) {
+                    userId = user.uid;
+                    isAuthReady = true;
+                    statusDisplay.textContent = '已登入 (載入匯率中...)';
+                    
+                    await fetchExchangeRate();
+                    
+                    if (hkdToTwdRate) {
+                        statusDisplay.textContent = `已登入 (1 HKD ≈ NT$ ${hkdToTwdRate.toFixed(2)})`;
+                    } else {
+                        statusDisplay.textContent = '已登入 (匯率載入失敗)';
+                    }
+                    
+                    loadingMessage.classList.add('hidden');
+                    listenForExpenses();
+                    renderNavigation();
+                    renderItinerary();
+                } else {
+                    try {
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(auth, initialAuthToken);
+                        } else {
+                            await signInAnonymously(auth);
+                            statusDisplay.textContent = '匿名登入';
+                        }
+                    } catch (error) {
+                        console.error("Firebase Auth failed:", error);
+                        loadingMessage.textContent = `身份驗證失敗，請檢查配置。錯誤: ${error.message}`;
+                    }
+                }
+            });
+
+        } catch (error) {
+            console.error("Firebase initialization failed:", error);
+            document.getElementById('loading-message').textContent = `應用程式初始化失敗。錯誤: ${error.message}`;
+        }
+    }
+
+    // --- 2. 匯率獲取功能 (使用 Gemini API) ---
+
+    async function fetchExchangeRate(retries = 3) {
+        const query = "Current exchange rate of 1 Hong Kong Dollar (HKD) to New Taiwan Dollar (TWD). Provide the numerical value only, up to 4 decimal places.";
+        const systemPrompt = "You are a precise data extraction tool. Respond ONLY with the numerical value for the current exchange rate, rounded to four decimal places. Do not include currency symbols or any explanatory text.";
+        
+        const payload = {
+            contents: [{ parts: [{ text: query }] }],
+            tools: [{ "google_search": {} }],
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+        };
+
+        for (let i = 0; i < retries; i++) {
+            try {
+                const response = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (response.status === 429) { // Too Many Requests
+                    if (i < retries - 1) {
+                        const delay = Math.pow(2, i) * 1000 + Math.random() * 500;
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        continue;
+                    }
+                }
+                
+                if (!response.ok) throw new Error(`API 請求失敗，狀態碼: ${response.status}`);
+
+                const result = await response.json();
+                const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+                
+                if (text) {
+                    const rate = parseFloat(text.match(/[\d\.]+/)?.[0]);
+                    if (!isNaN(rate) && rate > 0.1 && rate < 10) { // 合理性檢查
+                        hkdToTwdRate = rate;
+                        console.log(`Exchange Rate (HKD->TWD) fetched: ${hkdToTwdRate}`);
+                        return rate;
+                    }
+                }
+                console.warn("Failed to parse valid exchange rate from API response:", text);
+
+            } catch (error) {
+                console.error(`Attempt ${i + 1} failed for exchange rate:`, error.message);
+                if (i === retries - 1) break;
+                const delay = Math.pow(2, i) * 1000 + Math.random() * 500;
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+
+        if (hkdToTwdRate === null) {
+            hkdToTwdRate = 4.0; // 預設值
+            console.warn(`使用預設備用匯率: ${hkdToTwdRate}`);
+        }
+        return hkdToTwdRate;
+    }
+
+
+    // --- 3. Firestore 記帳操作 ---
+
+    function listenForExpenses() {
+        if (!isAuthReady || !userId) return;
+        const expensesQuery = getExpensesCollection(userId);
+        
+        onSnapshot(expensesQuery, (snapshot) => {
+            expenses = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            renderItinerary();
+            calculateGrandTotal();
+        }, (error) => {
+            console.error("Error listening to expenses:", error);
+        });
+    }
+
+    async function addExpense(day, item, amount) {
+        if (!isAuthReady || !userId || !item || !amount) return;
+        const amountFloat = parseFloat(amount);
+        if (isNaN(amountFloat) || amountFloat <= 0) { console.warn("金額無效。"); return; }
+
+        try {
+            await addDoc(getExpensesCollection(userId), {
+                day: day, item: item, amount: amountFloat, timestamp: serverTimestamp()
+            });
+        } catch (error) { console.error("Error adding document: ", error); }
+    }
+
+    async function deleteExpense(expenseId) {
+        if (!isAuthReady || !userId || !expenseId) return;
+        try {
+            await deleteDoc(doc(getExpensesCollection(userId), expenseId));
+        } catch (error) { console.error("Error deleting document: ", error); }
+    }
+    
+    // --- 4. 核心功能與渲染 ---
+
+    function calculateGrandTotal() {
+        const totalHKD = expenses.reduce((sum, expense) => sum + expense.amount, 0);
+        let grandTotalDisplay = `HK$ ${totalHKD.toFixed(2)}`;
+        
+        if (hkdToTwdRate) {
+            const totalTWD = totalHKD * hkdToTwdRate;
+            grandTotalDisplay += ` / NT$ ${totalTWD.toFixed(0)}`;
+        }
+        document.getElementById('grand-total').textContent = grandTotalDisplay;
+        document.getElementById('day-nav-bar').style.top = `${document.getElementById('main-header').offsetHeight}px`;
+    }
+
+    function switchDay(day) {
+        currentDay = day;
+        renderNavigation(); // 重新渲染導航以更新選中狀態
+        renderItinerary();
+    }
+    
+    // 行程數據 (保持不變)
+    const itinerary = [
+        {
+            day: 1, date: "Day 1",
+            items: [
+                { time: "11:00", type: "transport", name: "香港航空", detail: "抵達香港國際機場，升級商務艙", icon: "✈️" },
+                { time: "12:00", type: "transport", name: "A11 巴士", detail: "搭乘公車前往上環飯店", icon: "🚌" },
+                { time: "13:00", type: "attraction", name: "富蕙上環酒店 (Check-in)", detail: "辦理入住手續", icon: "🏨" },
+                { time: "14:00", type: "attraction", name: "蘭芳園 (中環)", detail: "喝經典絲襪奶茶或凍飲", icon: "🥤" },
+                { time: "14:30", type: "attraction", name: "一樂燒鴨", detail: "米其林推薦燒臘午餐", icon: "🍖" },
+                { time: "16:00", type: "attraction", name: "中環街市", detail: "參觀活化歷史建築與特色小店", icon: "🛍️" },
+                { time: "17:30", type: "attraction", name: "大館 (監獄舊址)", detail: "藝術、歷史、chill 的好地方", icon: "🏛️" },
+                { time: "20:00", type: "attraction", name: "楚然記大排檔", detail: "體驗地道港式晚餐", icon: "🍜" },
+            ]
+        },
+        {
+            day: 2, date: "Day 2",
+            items: [
+                { time: "09:30", type: "transport", name: "地鐵", detail: "前往堅尼地城", icon: "🚇" },
+                { time: "10:00", type: "attraction", name: "堅尼地城海旁", detail: "網美拍照打卡點", icon: "📸" },
+                { time: "11:30", type: "transport", name: "搭船 (港澳碼頭)", detail: "前往澳門氹仔客運碼頭", icon: "🚢" },
+                { time: "13:00", type: "attraction", name: "利軒冰室 (澳門)", detail: "澳門茶餐廳美食午餐", icon: "🍽️" },
+                { time: "15:00", type: "attraction", name: "威尼斯人酒店 (澳門)", detail: "安德魯蛋撻 & 賭 $100 小試手氣", icon: "🎰" },
+                { time: "17:00", type: "transport", name: "接駁車", detail: "往澳門外港碼頭準備回程", icon: "🚌" },
+                { time: "19:00", type: "attraction", name: "金美食 & 杏香園 (澳門)", detail: "晚餐替代選擇", icon: "🍲" },
+                { time: "21:00", type: "transport", name: "港珠澳大橋 (金山巴士)", detail: "搭金山巴士回香港 (入境小插曲)", icon: "🌉" },
+                { time: "22:30", type: "transport", name: "A11 巴士", detail: "回上環飯店休息", icon: "🏨" },
+            ]
+        },
+        {
+            day: 3, date: "Day 3",
+            items: [
+                { time: "09:00", type: "attraction", name: "瑞記咖啡 (上環)", detail: "早餐 (奶茶、西多士)", icon: "🥪" },
+                { time: "10:30", type: "transport", name: "地鐵", detail: "前往旺角/太子一帶", icon: "🚇" },
+                { time: "11:00", type: "attraction", name: "旦王 & 椰汁大王", detail: "旺角街頭小吃巡禮", icon: "🥚" },
+                { time: "12:30", type: "attraction", name: "黑地 (Blackground) & 太子", detail: "潮流服飾、特色小店逛街", icon: "👕" },
+                { time: "14:00", type: "attraction", name: "TWEMCO 翻頁鐘", detail: "購買經典設計時鐘", icon: "🕰️" },
+                { time: "16:00", type: "attraction", name: "K11 MUSEA (尖沙咀)", detail: "參觀商場、潮流藝術展覽", icon: "🖼️" },
+                { time: "17:30", type: "attraction", name: "紅茶 (Tea)", detail: "精緻下午茶或飲料", icon: "☕" },
+                { time: "19:30", type: "attraction", name: "地茂館甜品", detail: "晚餐後的港式甜點時間", icon: "🍧" },
+            ]
+        },
+        {
+            day: 4, date: "Day 4",
+            items: [
+                { time: "09:00", type: "attraction", name: "科記咖啡茶廳 (上環)", detail: "早餐 (豬扒包、蔥油撈麵)", icon: "🥖" },
+                { time: "10:30", type: "attraction", name: "澳洲牛奶公司 (佐敦)", detail: "必吃招牌炒蛋多士 (真的讚)", icon: "🍳" },
+                { time: "12:00", type: "attraction", name: "K11 hashtag B", detail: "再訪，終於買到蛋塔！", icon: "🥧" },
+                { time: "13:30", type: "attraction", name: "華嫂 & 帝苑餅店", detail: "外帶華嫂美食，購買蝴蝶酥伴手禮", icon: "🥡" },
+                { time: "15:00", type: "transport", name: "回程", detail: "前往機場準備登機，旅程結束", icon: "🛫" },
+            ]
+        },
+        {
+            day: INFO_PAGE_DAY, date: "Day 5", items: []
+        }
+    ];
+    
+    const toolInfoContent = `
+        <div class="space-y-4">
+            <div class="p-4 bg-gray-50 rounded-xl border border-gray-200">
+                <span class="inline-block px-3 py-1 text-sm font-semibold rounded-full bg-red-100 text-red-700">簽證與文件 (香港)</span>
+                <p class="mt-2 text-sm leading-relaxed text-gray-700">台灣旅客：持有效證件（如台胞證或護照+網上預辦入境登記），通常可免簽停留7至30天。**Day 2 提醒您，入境文件影本或電子檔最好備妥，以防查驗需要。**</p>
+            </div>
+            <div class="p-4 bg-gray-50 rounded-xl border border-gray-200">
+                <span class="inline-block px-3 py-1 text-sm font-semibold rounded-full bg-green-100 text-green-700">衣著建議</span>
+                <p class="mt-2 text-sm leading-relaxed text-gray-700">香港地鐵與商場冷氣極強，建議採用**多層次穿搭**。隨身攜帶薄外套是必須的！</p>
+            </div>
+            <div class="p-4 bg-gray-50 rounded-xl border border-gray-200">
+                <span class="inline-block px-3 py-1 text-sm font-semibold rounded-full bg-blue-100 text-blue-700">網路電信推薦</span>
+                <p class="mt-2 text-sm leading-relaxed text-gray-700">推薦使用 **eSIM (如 Airalo)** 或在機場/便利店購買當地的預付卡 (如 csl, 3HK)，確保網路順暢。</p>
+            </div>
+            <div class="p-4 bg-gray-50 rounded-xl border border-gray-200">
+                <span class="inline-block px-3 py-1 text-sm font-semibold rounded-full bg-yellow-100 text-yellow-700">防騙秘笈</span>
+                <p class="mt-2 text-sm leading-relaxed text-gray-700">1. **找零：** 在舊式茶餐廳或街邊攤販付現金，務必當面點清找零。2. **購物：** 購買電子產品請選擇大型、信譽良好的連鎖店。</p>
+            </div>
+             <div class="p-4 bg-gray-50 rounded-xl border border-gray-200">
+                <span class="inline-block px-3 py-1 text-sm font-semibold rounded-full bg-pink-100 text-pink-700">必買紀念品伴手禮</span>
+                <p class="mt-2 text-sm leading-relaxed text-gray-700">您的行程已包含：**帝苑餅店蝴蝶酥**（強烈推薦！）。其他可考慮：珍妮曲奇、檸檬王。</p>
+            </div>
+        </div>
+    `;
+
+    function selectDay(element, day) {
+        document.querySelectorAll('.day-item-inner').forEach(item => {
+            item.classList.remove('active');
+            item.classList.add('inactive');
+        });
+        element.classList.add('active');
+        element.classList.remove('inactive');
+        element.parentElement.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+        if (currentDay !== day) { switchDay(day); }
+    }
+
+    function renderNavigation() {
+        const navContainer = document.getElementById('day-navigation');
+        navContainer.innerHTML = '';
+        
+        const daysToRender = [1, 2, 3, 4, INFO_PAGE_DAY];
+        daysToRender.forEach((day) => {
+            const label = dayLabels[day];
+            const isCurrent = day === currentDay;
+            const dateItem = document.createElement('div');
+            dateItem.className = `day-item w-1/5 flex-shrink-0 snap-center p-1 md:p-2 cursor-pointer transition duration-200 transform`;
+            const innerContent = document.createElement('div');
+            innerContent.className = `day-item-inner ${isCurrent ? 'active' : 'inactive'}`;
+            innerContent.innerHTML = `<span class="text-base">${label}</span>`;
+            innerContent.onclick = () => selectDay(innerContent, day);
+            dateItem.appendChild(innerContent);
+            navContainer.appendChild(dateItem);
+        });
+
+        calculateGrandTotal(); 
+        const firstDayElement = navContainer.querySelector('.day-item-inner.active');
+        if (firstDayElement) {
+            firstDayElement.parentElement.scrollIntoView({ behavior: 'auto', block: 'nearest', inline: 'center' });
+        }
+    }
+
+    function renderItinerary() {
+        if (!isAuthReady) return; 
+        const container = document.getElementById('itinerary-cards');
+        container.innerHTML = '';
+
+        if (currentDay === INFO_PAGE_DAY) {
+            container.innerHTML = `
+                <div class="space-y-4">
+                    <div class="p-4 bg-white rounded-xl shadow-lg border border-gray-100">
+                        <h2 class="text-xl font-bold text-gray-800 pb-2 border-b border-gray-200 flex items-center mb-4 text-blue-600">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd" />
+                            </svg>
+                            香港旅遊實用資訊
+                        </h2>
+                        ${toolInfoContent}
+                    </div>
+                </div>
+            `;
+            return;
+        }
+
+        const dayPlan = itinerary.find(d => d.day === currentDay);
+        if (!dayPlan) return;
+
+        const itineraryList = document.createElement('div');
+        itineraryList.className = 'space-y-2';
+        
+        dayPlan.items.forEach((item, index) => {
+            const isAttraction = item.type === 'attraction';
+            const itemContainer = document.createElement('div');
+            itemContainer.className = 'itinerary-item';
+            const card = document.createElement('div');
+            card.id = `item-${dayPlan.day}-${index}`;
+            const cardBorderColor = isAttraction ? 'card-attraction' : 'card-transport';
+            card.className = `itinerary-card ${cardBorderColor}`;
+
+            card.innerHTML = `
+                <div class="flex justify-between items-start mb-2">
+                    <div class="flex-1">
+                        <p class="text-xs font-medium text-gray-400 mb-0.5">時間</p>
+                        <p class="text-2xl font-extrabold text-gray-800 leading-none">${item.time}</p>
+                    </div>
+                    <span class="text-3xl flex-shrink-0">${item.icon}</span>
+                </div>
+                
+                <h3 class="text-base font-bold text-gray-800 mt-2">${item.name}</h3>
+                <p class="text-sm text-gray-500 mt-1">${item.detail}</p>
+                
+                ${isAttraction ? `
+                    <button class='text-pink-600 hover:text-pink-700 focus:outline-none text-xs mt-3 px-3 py-1 border border-pink-600 rounded-full transition duration-150 flex-shrink-0 bg-pink-50/50 active:scale-95' 
+                            onclick="toggleInfo('info-${dayPlan.day}-${index}', '${item.name}', this, 'item-${dayPlan.day}-${index}')">
+                        故事 🔽
+                    </button>` : ''}
+            `;
+            if (isAttraction) {
+                const infoPanel = document.createElement('div');
+                infoPanel.id = `info-${dayPlan.day}-${index}`;
+                infoPanel.className = 'mt-3 pt-3 border-t border-gray-100 text-sm hidden w-full';
+                card.appendChild(infoPanel);
+            }
+            itemContainer.appendChild(card);
+            itineraryList.appendChild(itemContainer);
+        });
+        
+        container.appendChild(itineraryList);
+        const budgetWrapper = document.createElement('div');
+        budgetWrapper.className = 'mt-8 pb-10';
+        budgetWrapper.appendChild(renderBudgetSection(dayPlan));
+        container.appendChild(budgetWrapper);
+    }
+
+    function renderBudgetSection(dayPlan) {
+        const day = dayPlan.day; 
+        const section = document.createElement('section');
+        section.className = 'p-5 bg-gray-50 rounded-xl shadow-inner border border-gray-200 space-y-4';
+        
+        const dayExpenses = expenses.filter(e => e.day === day).sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
+        const dailyTotalHKD = dayExpenses.reduce((sum, e) => sum + e.amount, 0);
+
+        let dailyTotalDisplay = `總計: HK$ ${dailyTotalHKD.toFixed(2)}`;
+        let twdRateDisplay = '';
+        if (hkdToTwdRate) {
+            const dailyTotalTWD = dailyTotalHKD * hkdToTwdRate;
+            dailyTotalDisplay += ` / NT$ ${dailyTotalTWD.toFixed(0)}`;
+            twdRateDisplay = `(1 HKD ≈ NT$ ${hkdToTwdRate.toFixed(2)})`;
+        }
+
+        let expensesListHTML = dayExpenses.map(e => `
+            <div class="flex justify-between items-center py-1 border-b border-gray-100 last:border-b-0">
+                <span class="text-gray-700 text-sm">${e.item}</span>
+                <div class="flex items-center space-x-2">
+                    <span class="font-semibold text-red-600 text-sm">HK$ ${e.amount.toFixed(2)}</span>
+                    <button class="text-gray-400 hover:text-red-500 transition duration-150" onclick="deleteExpense('${e.id}')">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd" />
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        `).join('');
+
+        if (expensesListHTML.length === 0) {
+            expensesListHTML = `<p class="text-center text-gray-400 py-4">今天還沒有記帳哦！</p>`;
+        }
+
+        section.innerHTML = `
+            <div class="flex justify-between items-start pb-2 border-b border-gray-300">
+                <div>
+                    <h3 class="text-lg font-bold text-gray-800 flex items-center">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 inline-block mr-2 -mt-0.5 text-red-500" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd" d="M4 4a2 2 0 00-2 2v4a2 2 0 002 2V6h10a2 2 0 00-2 2v4a2 2 0 002 2h2a2 2 0 002-2V6a2 2 0 00-2-2H4zm10 8V6h2v6h-2z" clip-rule="evenodd" />
+                        </svg>
+                        ${dayLabels[day]} 記帳本
+                    </h3>
+                    <p class="text-xs text-gray-400 mt-1">${twdRateDisplay}</p>
+                </div>
+                <span class="text-xl font-extrabold text-red-500">${dailyTotalDisplay}</span>
+            </div>
+
+            <div class="space-y-3 p-3 bg-white rounded-lg shadow-sm">
+                <form id="add-expense-form-${day}" class="flex space-x-2 items-center">
+                    <input type="text" id="expense-item-${day}" placeholder="項目 (e.g. 午餐)" required
+                           class="flex-1 p-2 border border-gray-200 rounded-lg text-sm focus:ring-blue-500 focus:border-blue-500">
+                    <input type="number" id="expense-amount-${day}" placeholder="金額 (HK$)" required min="0.01" step="0.01"
+                           class="w-24 p-2 border border-gray-200 rounded-lg text-sm text-right focus:ring-blue-500 focus:border-blue-500">
+                    <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white p-2 rounded-lg transition duration-150 transform active:scale-95 text-sm font-semibold flex-shrink-0">
+                        新增
+                    </button>
+                </form>
+            </div>
+            
+            <div id="expenses-list-${day}" class="bg-white rounded-lg p-3 border border-gray-100">
+                ${expensesListHTML}
+            </div>
+        `;
+        
+        // 設定表單提交事件
+        section.querySelector(`#add-expense-form-${day}`).onsubmit = function(e) {
+            e.preventDefault();
+            const itemInput = document.getElementById(`expense-item-${day}`);
+            const amountInput = document.getElementById(`expense-amount-${day}`);
+            addExpense(day, itemInput.value, amountInput.value);
+            itemInput.value = '';
+            amountInput.value = '';
+        };
+
+        return section;
+    }
+
+    // --- 5. 景點故事查詢功能 ---
+
+    window.toggleInfo = async function(infoId, attractionName, button, cardId) {
+        const infoPanel = document.getElementById(infoId);
+        const card = document.getElementById(cardId);
+
+        if (infoPanel.classList.contains('hidden')) {
+            // 展開
+            button.innerHTML = '故事 🔼';
+            card.classList.add('shadow-xl'); // 展開時強調陰影
+            infoPanel.classList.remove('hidden');
+
+            if (loadedContent[attractionName]) {
+                // 如果已經載入過，直接顯示
+                infoPanel.innerHTML = loadedContent[attractionName];
+            } else {
+                // 否則，顯示載入中並調用 API
+                infoPanel.innerHTML = `
+                    <div class="flex justify-center items-center py-4 text-gray-500">
+                        <span class="loading-dot w-2 h-2 bg-pink-500 rounded-full mr-1"></span>
+                        <span class="loading-dot w-2 h-2 bg-pink-500 rounded-full mr-1"></span>
+                        <span class="loading-dot w-2 h-2 bg-pink-500 rounded-full"></span>
+                        <span class="ml-2">正在為您查詢 ${attractionName} 的故事...</span>
+                    </div>
+                `;
+                const story = await fetchStory(attractionName);
+                const htmlContent = `
+                    <h4 class="font-bold text-pink-600 mb-1">歷史 / 趣聞</h4>
+                    <p class="text-gray-600 leading-relaxed">${story}</p>
+                `;
+                loadedContent[attractionName] = htmlContent;
+                infoPanel.innerHTML = htmlContent;
+            }
+        } else {
+            // 收合
+            button.innerHTML = '故事 🔽';
+            card.classList.remove('shadow-xl');
+            infoPanel.classList.add('hidden');
+        }
+    }
+
+    async function fetchStory(attractionName, retries = 3) {
+        const query = `Provide a fun fact, a brief history, or a local story about the Hong Kong location: ${attractionName}. The response must be a single, interesting paragraph suitable for a travel guide. Respond in Traditional Chinese.`;
+        
+        const payload = {
+            contents: [{ parts: [{ text: query }] }],
+            tools: [{ "google_search": {} }],
+        };
+
+        for (let i = 0; i < retries; i++) {
+            try {
+                const response = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (response.status === 429) { // Too Many Requests
+                    if (i < retries - 1) {
+                        const delay = Math.pow(2, i) * 1000 + Math.random() * 500;
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        continue;
+                    }
+                }
+
+                if (!response.ok) throw new Error(`API 請求失敗，狀態碼: ${response.status}`);
+                
+                const result = await response.json();
+                const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+                
+                if (text) {
+                    return text.trim();
+                }
+
+            } catch (error) {
+                console.error(`Attempt ${i + 1} failed for story of ${attractionName}:`, error.message);
+                if (i === retries - 1) break;
+                const delay = Math.pow(2, i) * 1000 + Math.random() * 500;
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+
+        return `抱歉，目前無法載入 ${attractionName} 的故事。請稍後再試。`;
+    }
+
+    // 將 deleteExpense 暴露給全域 window
+    window.deleteExpense = deleteExpense;
+    
+    // 應用程式啟動
+    initFirebase();
+</script>
+</body>
+</html>
